@@ -69,7 +69,8 @@ if (!(await file(tarFile).exists())) {
 
   console.log(`Image saved as ${tarFile}, extracting...`);
 
-  await mkdir(imagePath);
+  // Local fix: recursive flag prevents EEXIST if directory exists from partial previous runs
+  await mkdir(imagePath, { recursive: true });
 
   const result = await extract({
     file: tarFile,
@@ -131,7 +132,8 @@ for (const layer of manifest.Layers) {
       }
 
       const inprogressPath = path.join(cacheFolder, layerName + "-in-progress");
-      await rm(inprogressPath, { recursive: true });
+      // Local fix: force flag prevents ENOENT error when file doesn't exist (first run or successful cleanup)
+      await rm(inprogressPath, { force: true, recursive: true });
 
       const hasher = new Bun.CryptoHasher("sha256");
       const cacheWriter = file(inprogressPath).writer();
