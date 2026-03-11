@@ -106,18 +106,17 @@ function authHeaderIntoAuthContext(urlObject: URL, authenticateHeader: string): 
     }
 
     const name = variable.slice(0, firstEqual);
-    const value = variable.slice(firstEqual + 1);
-    const isMalformed = value.length < 2 || value[0] !== `"` || value[value.length - 1] !== `"`;
-    if (isMalformed) {
-      throw new Error(`malformed value on auth header on registry ${url}`);
+    let value = variable.slice(firstEqual + 1);
+
+    if (value.length >= 2 && value[0] === `"` && value[value.length - 1] === `"`) {
+      value = value.slice(1, value.length - 1);
     }
 
-    const trimmedValue = value.slice(1, value.length - 1);
     switch (name) {
       case "realm":
       case "scope":
       case "service":
-        authContextOptional[name] = trimmedValue;
+        authContextOptional[name] = value;
         break;
       default:
         console.debug(`unknown auth attribute ${name} on registry ${url}`);
