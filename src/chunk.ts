@@ -8,8 +8,8 @@ export const MINIMUM_CHUNK = 1024 * 1024 * 5;
 // 5GiB
 export const MAXIMUM_CHUNK = MINIMUM_CHUNK * 1024;
 
-// 100MB
-export const MAXIMUM_CHUNK_UPLOAD_SIZE = 1000 * 1000 * 100;
+// 10MB
+export const MAXIMUM_CHUNK_UPLOAD_SIZE = 1000 * 1000 * 10;
 
 export const getHelperR2Path = (id: string): string => {
   return `${id}-helper`;

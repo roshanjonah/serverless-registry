@@ -248,7 +248,7 @@ async function pushLayer(layerDigest: string, readableStream: ReadableStream, to
     );
   }
 
-  const maxChunkLength = +(createUploadResponse.headers.get("oci-chunk-max-length") ?? 100 * 1024 * 1024);
+  const maxChunkLength = +(createUploadResponse.headers.get("oci-chunk-max-length") ?? 10 * 1000 * 1000);
   if (isNaN(maxChunkLength)) {
     throw new Error(`oci-chunk-max-length header is malformed (not a number)`);
   }
@@ -353,6 +353,8 @@ for (const compressedDigest of compressedDigests) {
           layer = file(path.join(cacheFolder, compressedDigest));
         }
       }
+
+      throw new Error(`Failed to push layer sha256:${compressedDigest} after ${maxRetries} attempts`);
     }),
   );
 }
