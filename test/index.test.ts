@@ -607,7 +607,7 @@ describe("http client", () => {
     envBindings.PASSWORD = "world";
     envBindings.USERNAME = "hello";
     envBindings.REGISTRIES_JSON = undefined;
-    global.fetch = async function (r: URL | RequestInfo): Promise<Response> {
+    global.fetch = async function (r: RequestInfo): Promise<Response> {
       return fetch(new Request(r));
     };
     const client = new RegistryHTTPClient(envBindings, {
@@ -631,7 +631,7 @@ describe("http client", () => {
     envBindings.READONLY_PASSWORD = "world";
     envBindings.READONLY_USERNAME = "hello";
     envBindings.REGISTRIES_JSON = undefined;
-    global.fetch = async function (r: URL | RequestInfo): Promise<Response> {
+    global.fetch = async function (r: RequestInfo): Promise<Response> {
       return fetch(new Request(r));
     };
     const client = new RegistryHTTPClient(envBindings, {
