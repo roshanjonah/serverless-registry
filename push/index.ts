@@ -98,7 +98,7 @@ if (manifests.length > 1) {
 }
 
 import plimit from "p-limit";
-const pool = plimit(5);
+const pool = plimit(2);
 import zlib from "node:zlib";
 import { rename, rm } from "node:fs/promises";
 
@@ -248,7 +248,7 @@ async function pushLayer(layerDigest: string, readableStream: ReadableStream, to
     );
   }
 
-  const maxChunkLength = +(createUploadResponse.headers.get("oci-chunk-max-length") ?? 10 * 1000 * 1000);
+  const maxChunkLength = +(createUploadResponse.headers.get("oci-chunk-max-length") ?? 95 * 1000 * 1000);
   if (isNaN(maxChunkLength)) {
     throw new Error(`oci-chunk-max-length header is malformed (not a number)`);
   }
@@ -349,7 +349,13 @@ for (const compressedDigest of compressedDigests) {
           await pushLayer(digest, stream, layer.size);
           return;
         } catch (err) {
-          console.error(digest, "failed to upload", maxRetries - i - 1, "left...", err);
+          const retriesLeft = maxRetries - i - 1;
+          console.error(digest, "failed to upload", retriesLeft, "left...", err);
+          if (retriesLeft > 0) {
+            const delay = Math.pow(2, i) * 5000;
+            console.log(`Waiting ${delay / 1000}s before retry...`);
+            await new Promise((r) => setTimeout(r, delay));
+          }
           layer = file(path.join(cacheFolder, compressedDigest));
         }
       }
