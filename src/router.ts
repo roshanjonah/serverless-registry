@@ -3,6 +3,13 @@ import { BlobUnknownError, ManifestUnknownError } from "./v2-errors";
 import { InternalError, ServerError } from "./errors";
 import { errorString, getStreamSize, jsonHeaders, wrap } from "./utils";
 import { hexToDigest, isValidDigest } from "./user";
+import {
+  cleanupAllRepositories,
+  cleanupRepository,
+  DEFAULT_RETENTION_COUNT,
+  resolveCleanupOptions,
+  type CleanupOptions,
+} from "./registry/cleanup";
 import { ManifestTagsListTooBigError } from "./v2-responses";
 import { Env } from "..";
 import { MINIMUM_CHUNK, MAXIMUM_CHUNK, MAXIMUM_CHUNK_UPLOAD_SIZE } from "./chunk";
@@ -55,6 +62,32 @@ v2Router.get("/_catalog", async (req, env: Env) => {
       },
     },
   );
+});
+
+// Admin endpoint that runs the same logic as the scheduled() handler. Mirrors
+// the _catalog pattern (underscore-prefixed so it can't collide with a repo
+// name) and reuses the existing basic-auth middleware. Useful for verifying
+// the dry-run plan before the weekly cron fires, or for ad-hoc cleanups.
+v2Router.post("/_cleanup", async (req, env: Env) => {
+  const { dry_run, retention, repo } = req.query;
+  const base = resolveCleanupOptions(env);
+  const options: CleanupOptions = {
+    dryRun: dry_run !== undefined ? String(dry_run).toLowerCase() === "true" : base.dryRun,
+    retentionCount:
+      retention !== undefined
+        ? Math.max(1, parseInt(retention.toString(), 10) || DEFAULT_RETENTION_COUNT)
+        : base.retentionCount,
+  };
+
+  console.log(`manual cleanup invoked retention=${options.retentionCount} dryRun=${options.dryRun} repo=${repo ?? "<all>"}`);
+
+  if (repo !== undefined) {
+    const result = await cleanupRepository(env, repo.toString(), options);
+    return new Response(JSON.stringify(result, null, 2), { headers: jsonHeaders() });
+  }
+
+  const summary = await cleanupAllRepositories(env, options);
+  return new Response(JSON.stringify(summary, null, 2), { headers: jsonHeaders() });
 });
 
 v2Router.delete("/:name+/manifests/:reference", async (req, env: Env) => {

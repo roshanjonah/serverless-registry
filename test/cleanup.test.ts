@@ -266,11 +266,60 @@ describe("scheduled() handler", () => {
     const e = env as Env;
     e.RETENTION_COUNT = "3";
     e.RETENTION_DRY_RUN = "true";
-    const ctrl = createScheduledController({ scheduledTime: new Date(0), cron: "0 16 * * 0" });
+    const ctrl = createScheduledController({ scheduledTime: new Date(0), cron: "0 16 * * SUN" });
     const ctx = createExecutionContext();
     await worker.scheduled!(ctrl, e, ctx);
     await waitOnExecutionContext(ctx);
     // No assertion beyond "did not throw" — the per-repo behaviour is covered
     // by the tests above. This proves the entrypoint glue is wired correctly.
+  });
+});
+
+describe("POST /v2/_cleanup", () => {
+  test("returns dry-run summary when dry_run=true override", async () => {
+    const e = env as Env;
+    e.REGISTRY_CLIENT = new R2Registry(e);
+    const name = "endpoint-dryrun";
+    for (const t of ["v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3"]) {
+      await pushManifestWithTag(name, t);
+    }
+    const res = await callWorker(authedRequest("POST", `/v2/_cleanup?dry_run=true&retention=2&repo=${name}`));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as {
+      repository: string;
+      tagsDeleted: string[];
+      gcRan: boolean;
+    };
+    expect(body.repository).toBe(name);
+    expect(body.tagsDeleted.sort()).toEqual(["v1.0.0", "v1.0.1"]);
+    expect(body.gcRan).toBe(false);
+    // Pointers untouched in dry run.
+    expect((await listTagPointers(name)).sort()).toEqual(["v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3"]);
+  });
+
+  test("real run via endpoint deletes tags and runs GC", async () => {
+    const e = env as Env;
+    e.REGISTRY_CLIENT = new R2Registry(e);
+    const name = "endpoint-real";
+    for (const t of ["v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3"]) {
+      await pushManifestWithTag(name, t);
+    }
+    const res = await callWorker(authedRequest("POST", `/v2/_cleanup?dry_run=false&retention=2&repo=${name}`));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { tagsDeleted: string[]; gcRan: boolean };
+    expect(body.tagsDeleted.sort()).toEqual(["v1.0.0", "v1.0.1"]);
+    expect(body.gcRan).toBe(true);
+    expect((await listTagPointers(name)).sort()).toEqual(["v1.0.2", "v1.0.3"]);
+  });
+
+  test("without ?repo runs across all repositories", async () => {
+    const e = env as Env;
+    e.REGISTRY_CLIENT = new R2Registry(e);
+    const res = await callWorker(authedRequest("POST", `/v2/_cleanup?dry_run=true&retention=10`));
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { dryRun: boolean; retentionCount: number; repositories: unknown[] };
+    expect(body.dryRun).toBe(true);
+    expect(body.retentionCount).toBe(10);
+    expect(Array.isArray(body.repositories)).toBe(true);
   });
 });
