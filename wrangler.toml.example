@@ -19,7 +19,7 @@ r2_buckets = [
 # Weekly retention sweep: prunes excess semver tags then runs untagged GC per repo.
 # Sunday 16:00 UTC (~05:00 Mon NZST) is a low-traffic window.
 [env.production.triggers]
-crons = ["0 16 * * 0"]
+crons = ["0 16 * * SUN"]
 
 # Allow the cron handler up to 5 minutes of CPU per invocation; the registry
 # walks every repo serially and may issue many R2 deletes.
