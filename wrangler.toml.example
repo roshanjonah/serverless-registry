@@ -16,8 +16,24 @@ r2_buckets = [
   { binding = "REGISTRY", bucket_name = "" }
 ]
 
+# Weekly retention sweep: prunes excess semver tags then runs untagged GC per repo.
+# Sunday 16:00 UTC (~05:00 Mon NZST) is a low-traffic window.
+[env.production.triggers]
+crons = ["0 16 * * 0"]
+
+# Allow the cron handler up to 5 minutes of CPU per invocation; the registry
+# walks every repo serially and may issue many R2 deletes.
+[env.production.limits]
+cpu_ms = 300000
+
 [env.production.vars]
 JWT_REGISTRY_TOKENS_PUBLIC_KEY = ""
+# Number of highest-precedence semver tags to keep per repo; non-semver tags
+# (e.g. `latest`, branch names) are always preserved.
+RETENTION_COUNT = "3"
+# Set to "true" to log the deletion plan without touching anything. Flip to
+# "false" once you've verified the plan in the logs.
+RETENTION_DRY_RUN = "true"
 
 # Secrets:
 # USERNAME/PASSWORD/READONLY_USERNAME/READONLY_PASSWORD if you want username/password based auth

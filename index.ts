@@ -8,6 +8,7 @@ import v2Router from "./src/router";
 import { authenticationMethodFromEnv } from "./src/authentication-method";
 import { Registry } from "./src/registry/registry";
 import { R2Registry } from "./src/registry/r2";
+import { cleanupAllRepositories, resolveCleanupOptions } from "./src/registry/cleanup";
 
 // A full compatibility mode means that the r2 registry will try its best to
 // help the client on the layer push. See how we let the client push layers with chunked uploads for more information.
@@ -24,6 +25,8 @@ export interface Env {
   PUSH_COMPATIBILITY_MODE?: PushCompatibilityMode;
   REGISTRIES_JSON?: string; // should be in the format of RegistryConfiguration[];
   REGISTRY_CLIENT: Registry;
+  RETENTION_COUNT?: string;
+  RETENTION_DRY_RUN?: string;
 }
 
 const router = Router();
@@ -78,6 +81,36 @@ export default {
       );
       return new InternalError();
     }
+  },
+
+  async scheduled(controller: ScheduledController, env: Env, ctx: ExecutionContext) {
+    if (!ensureConfig(env)) return;
+    env.REGISTRY_CLIENT = new R2Registry(env);
+    const options = resolveCleanupOptions(env);
+    console.log(
+      `scheduled cleanup start cron=${controller.cron} retention=${options.retentionCount} dryRun=${options.dryRun}`,
+    );
+    ctx.waitUntil(
+      (async () => {
+        try {
+          const summary = await cleanupAllRepositories(env, options);
+          const totalDeleted = summary.repositories.reduce((acc, r) => acc + r.tagsDeleted.length, 0);
+          const errored = summary.repositories.filter((r) => r.error).length;
+          console.log(
+            `scheduled cleanup done repos=${summary.repositories.length} deletedTags=${totalDeleted} errors=${errored}`,
+          );
+          for (const repo of summary.repositories) {
+            if (repo.tagsDeleted.length > 0 || repo.error !== undefined) {
+              console.log(
+                `cleanup ${repo.repository}: total=${repo.tagsTotal} kept_semver=${repo.semverKept.length} kept_other=${repo.nonSemverKept.length} deleted=${repo.tagsDeleted.length} gc=${repo.gcRan} ${repo.error ?? ""}`,
+              );
+            }
+          }
+        } catch (err) {
+          console.error("scheduled cleanup failed:", err instanceof Error ? err.stack : err);
+        }
+      })(),
+    );
   },
 } satisfies ExportedHandler<Env>;
 
