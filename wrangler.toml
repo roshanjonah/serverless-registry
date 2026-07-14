@@ -1,0 +1,40 @@
+name = "r2-registry"
+
+routes = [
+  { pattern = "privregistry.jaa.nz", custom_domain = true }
+]
+
+workers_dev = false
+main = "./index.ts"
+compatibility_date = "2024-09-09"
+compatibility_flags = ["nodejs_compat"]
+
+[env.production]
+r2_buckets = [
+  { binding = "REGISTRY", bucket_name = "r2-registry" }
+]
+
+[env.production.observability]
+enabled = true
+
+# Weekly retention sweep: prunes excess unprotected semver tags, then runs
+# untagged GC per repository.
+[env.production.triggers]
+crons = ["0 16 * * SUN"]
+
+[env.production.limits]
+cpu_ms = 300000
+
+[env.production.vars]
+# Full-match JavaScript regular expression for tags that must never be moved or
+# deleted. Operational tags such as `latest` remain mutable.
+IMMUTABLE_TAG_PATTERN = 'v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)'
+# Number of highest-precedence unprotected semver tags to keep per repository.
+# Protected and non-semver tags are always preserved.
+RETENTION_COUNT = "3"
+RETENTION_DRY_RUN = "false"
+
+# USERNAME, PASSWORD, READONLY_USERNAME, and READONLY_PASSWORD are secrets.
+
+[env.dev]
+r2_buckets = [{ binding = "REGISTRY", bucket_name = "r2-image-registry-dev" }]

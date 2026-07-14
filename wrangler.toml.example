@@ -27,9 +27,12 @@ crons = ["0 16 * * SUN"]
 cpu_ms = 300000
 
 [env.production.vars]
-JWT_REGISTRY_TOKENS_PUBLIC_KEY = ""
-# Number of highest-precedence semver tags to keep per repo; non-semver tags
-# (e.g. `latest`, branch names) are always preserved.
+# Optional full-match JavaScript regular expression for tags that must never be
+# moved or deleted. This example protects strict vX.Y.Z releases while leaving
+# operational tags such as `latest` mutable.
+IMMUTABLE_TAG_PATTERN = 'v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)'
+# Number of highest-precedence unprotected semver tags to keep per repo;
+# protected and non-semver tags (e.g. `latest`, branch names) are preserved.
 RETENTION_COUNT = "3"
 # Set to "true" to log the deletion plan without touching anything. Flip to
 # "false" once you've verified the plan in the logs.
@@ -42,12 +45,5 @@ RETENTION_DRY_RUN = "true"
 ## Dev - For local dev using `npx wrangler dev`
 [env.dev]
 r2_buckets = [{ binding = "REGISTRY", bucket_name = "r2-image-registry-dev" }]
-[env.dev.vars]
-# REGISTRIES_JSON = "[{ \"registry\": \"http://localhost:9999\", \"password_env\": \"PASSWORD\", \"username\": \"hello\" }]"
-USERNAME = "hello"
-PASSWORD = "world"
-# READONLY_USERNAME = "readonly"
-# READONLY_PASSWORD = "readonly"
-# The necessary secrets are:
-# Setup those secrets on .dev.vars in the root of the project
-#
+
+# Put local authentication values in .dev.vars, never in this file.

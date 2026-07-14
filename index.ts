@@ -27,6 +27,7 @@ export interface Env {
   REGISTRY_CLIENT: Registry;
   RETENTION_COUNT?: string;
   RETENTION_DRY_RUN?: string;
+  IMMUTABLE_TAG_PATTERN?: string;
 }
 
 const router = Router();

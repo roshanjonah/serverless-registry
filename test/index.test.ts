@@ -343,6 +343,307 @@ describe("v2 manifests", () => {
     await bindings.REGISTRY.delete(`${name}/manifests/${reference}`);
   });
 
+  test("immutable release tag rejects a different manifest without changing its digest", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "immutable-release-overwrite";
+    const tag = "v1.2.3";
+
+    try {
+      const firstManifest = await generateManifest(name);
+      const { sha256: firstDigest } = await createManifest(name, firstManifest, tag);
+      const secondManifest = await generateManifest(name);
+      const response = await fetch(
+        createRequest("PUT", `/v2/${name}/manifests/${tag}`, new Blob([JSON.stringify(secondManifest)]).stream(), {
+          "Content-Type": "application/gzip",
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        errors: [expect.objectContaining({ code: "DENIED" })],
+      });
+
+      const stored = await fetch(createRequest("HEAD", `/v2/${name}/manifests/${tag}`, null));
+      expect(stored.headers.get("docker-content-digest")).toBe(firstDigest);
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("concurrent writers cannot assign different manifests to one immutable release tag", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "immutable-release-concurrent";
+    const tag = "v1.2.3";
+
+    try {
+      const manifests = [await generateManifest(name), await generateManifest(name)];
+      const manifestData = manifests.map((manifest) => JSON.stringify(manifest));
+      const expectedDigests = await Promise.all(manifestData.map((data) => getSHA256(data)));
+      const responses = await Promise.all(
+        manifestData.map((data) =>
+          fetch(
+            createRequest("PUT", `/v2/${name}/manifests/${tag}`, new Blob([data]).stream(), {
+              "Content-Type": "application/gzip",
+            }),
+          ),
+        ),
+      );
+
+      expect(responses.map((response) => response.status).sort()).toEqual([201, 409]);
+      const stored = await fetch(createRequest("HEAD", `/v2/${name}/manifests/${tag}`, null));
+      expect(expectedDigests).toContain(stored.headers.get("docker-content-digest"));
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("immutable release tag accepts an idempotent retry of the same manifest", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "immutable-release-retry";
+    const tag = "v1.2.3";
+
+    try {
+      const manifest = await generateManifest(name);
+      const first = await uploadManifest(name, manifest, tag);
+      const retry = await fetch(
+        createRequest("PUT", `/v2/${name}/manifests/${tag}`, new Blob([JSON.stringify(manifest)]).stream(), {
+          "Content-Type": "application/gzip",
+        }),
+      );
+
+      expect(retry.status).toBe(201);
+      expect(retry.headers.get("docker-content-digest")).toBe(first.sha256);
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("tag outside the immutable pattern remains mutable", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "mutable-operational-tag";
+    const tag = "latest";
+
+    try {
+      const firstManifest = await generateManifest(name);
+      const { sha256: firstDigest } = await createManifest(name, firstManifest, tag);
+      const secondManifest = await generateManifest(name);
+      const { sha256: secondDigest } = await createManifest(name, secondManifest, tag);
+
+      expect(secondDigest).not.toBe(firstDigest);
+      const stored = await fetch(createRequest("HEAD", `/v2/${name}/manifests/${tag}`, null));
+      expect(stored.headers.get("docker-content-digest")).toBe(secondDigest);
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("immutable release tag cannot be deleted", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "immutable-release-delete";
+    const tag = "v1.2.3";
+
+    try {
+      const manifest = await generateManifest(name);
+      const { sha256 } = await createManifest(name, manifest, tag);
+      const response = await fetch(createRequest("DELETE", `/v2/${name}/manifests/${tag}`, null));
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        errors: [expect.objectContaining({ code: "DENIED" })],
+      });
+      const stored = await fetch(createRequest("HEAD", `/v2/${name}/manifests/${tag}`, null));
+      expect(stored.headers.get("docker-content-digest")).toBe(sha256);
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("tag outside the immutable pattern remains deletable", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "mutable-operational-tag-delete";
+    const tag = "latest";
+
+    try {
+      await createManifest(name, await generateManifest(name), tag);
+      const response = await fetch(createRequest("DELETE", `/v2/${name}/manifests/${tag}`, null));
+
+      expect(response.status).toBe(202);
+      expect((await fetch(createRequest("HEAD", `/v2/${name}/manifests/${tag}`, null))).status).toBe(404);
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("manifest digest cannot be deleted while an immutable tag points to it", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "immutable-release-digest-delete";
+    const tag = "v1.2.3";
+
+    try {
+      const manifest = await generateManifest(name);
+      const { sha256 } = await createManifest(name, manifest, tag);
+      const response = await fetch(createRequest("DELETE", `/v2/${name}/manifests/${sha256}`, null));
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        errors: [expect.objectContaining({ code: "DENIED" })],
+      });
+      expect((await fetch(createRequest("HEAD", `/v2/${name}/manifests/${tag}`, null))).status).toBe(200);
+      expect((await fetch(createRequest("HEAD", `/v2/${name}/manifests/${sha256}`, null))).status).toBe(200);
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("digest deletion is blocked before paginated alias mutation when immutable policy is enabled", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "immutable-release-paginated-digest-delete";
+    const releaseTag = "v1.2.3";
+    const operationalTag = "latest";
+
+    try {
+      const manifest = await generateManifest(name);
+      const { sha256 } = await createManifest(name, manifest, operationalTag);
+      await uploadManifest(name, manifest, releaseTag);
+
+      const response = await fetch(createRequest("DELETE", `/v2/${name}/manifests/${sha256}?limit=1`, null));
+
+      expect(response.status).toBe(409);
+      expect((await fetch(createRequest("HEAD", `/v2/${name}/manifests/${operationalTag}`, null))).status).toBe(200);
+      expect((await fetch(createRequest("HEAD", `/v2/${name}/manifests/${releaseTag}`, null))).status).toBe(200);
+      expect((await fetch(createRequest("HEAD", `/v2/${name}/manifests/${sha256}`, null))).status).toBe(200);
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("blob deletion cannot make an immutable release unpullable", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "immutable-release-blob-delete";
+    const tag = "v1.2.3";
+
+    try {
+      const manifest = getImageManifestV2(await generateManifest(name));
+      await createManifest(name, manifest, tag);
+      const layerDigest = manifest.layers[0].digest;
+
+      const response = await fetch(createRequest("DELETE", `/v2/${name}/blobs/${layerDigest}`, null));
+
+      expect(response.status).toBe(409);
+      expect(await response.json()).toEqual({
+        errors: [expect.objectContaining({ code: "DENIED" })],
+      });
+      expect((await fetch(createRequest("HEAD", `/v2/${name}/blobs/${layerDigest}`, null))).status).toBe(200);
+      const manifestResponse = await fetch(createRequest("GET", `/v2/${name}/manifests/${tag}`, null));
+      expect(manifestResponse.status).toBe(200);
+      await manifestResponse.arrayBuffer();
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("blob deletion remains available when immutable tag policy is disabled", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = undefined;
+    const name = "mutable-blob-delete";
+
+    try {
+      const manifest = getImageManifestV2(await generateManifest(name));
+      const layerDigest = manifest.layers[0].digest;
+
+      const response = await fetch(createRequest("DELETE", `/v2/${name}/blobs/${layerDigest}`, null));
+
+      expect(response.status).toBe(202);
+      expect((await fetch(createRequest("HEAD", `/v2/${name}/blobs/${layerDigest}`, null))).status).toBe(404);
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("invalid immutable tag policy fails before any manifest object is stored", async () => {
+    const bindings = env as Env & { IMMUTABLE_TAG_PATTERN?: string };
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = "[";
+    const name = "invalid-immutable-policy";
+    const tag = "v1.2.3";
+
+    try {
+      const manifest = await generateManifest(name);
+      const manifestData = JSON.stringify(manifest);
+      const digest = await getSHA256(manifestData);
+      const response = await fetch(
+        createRequest("PUT", `/v2/${name}/manifests/${tag}`, new Blob([manifestData]).stream(), {
+          "Content-Type": "application/gzip",
+        }),
+      );
+
+      expect(response.status).toBe(500);
+      expect(await bindings.REGISTRY.head(`${name}/manifests/${tag}`)).toBeNull();
+      expect(await bindings.REGISTRY.head(`${name}/manifests/${digest}`)).toBeNull();
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
+  test("manifest PUT by digest rejects bytes whose computed digest does not match the URL", async () => {
+    const bindings = env as Env;
+    const name = "manifest-digest-mismatch";
+    const manifest = await generateManifest(name);
+    const manifestData = JSON.stringify(manifest);
+    const computedDigest = await getSHA256(manifestData);
+    const differentManifest = await generateManifest(name);
+    const requestedDigest = await getSHA256(JSON.stringify(differentManifest));
+
+    const response = await fetch(
+      createRequest("PUT", `/v2/${name}/manifests/${requestedDigest}`, new Blob([manifestData]).stream(), {
+        "Content-Type": "application/gzip",
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(await response.json()).toEqual({
+      errors: [expect.objectContaining({ code: "MANIFEST_INVALID" })],
+    });
+    expect(await bindings.REGISTRY.head(`${name}/manifests/${requestedDigest}`)).toBeNull();
+    expect(await bindings.REGISTRY.head(`${name}/manifests/${computedDigest}`)).toBeNull();
+  });
+
+  test("manifest PUT by its computed digest remains valid", async () => {
+    const name = "manifest-digest-match";
+    const manifest = await generateManifest(name);
+    const manifestData = JSON.stringify(manifest);
+    const digest = await getSHA256(manifestData);
+
+    const response = await fetch(
+      createRequest("PUT", `/v2/${name}/manifests/${digest}`, new Blob([manifestData]).stream(), {
+        "Content-Type": "application/gzip",
+      }),
+    );
+
+    expect(response.status).toBe(201);
+    expect(response.headers.get("docker-content-digest")).toBe(digest);
+    expect((await fetch(createRequest("HEAD", `/v2/${name}/manifests/${digest}`, null))).status).toBe(200);
+  });
+
   test("PUT then DELETE /v2/:name/manifests/:reference works", async () => {
     const { sha256 } = await createManifest("hello-world", await generateManifest("hello-world"), "hello");
     const bindings = env as Env;
@@ -475,6 +776,50 @@ describe("v2 manifests", () => {
 });
 
 describe("v2 referrers", () => {
+  test("immutable tag conflict does not index the rejected referrer", async () => {
+    const bindings = env as Env;
+    const previousPattern = bindings.IMMUTABLE_TAG_PATTERN;
+    bindings.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    const name = "immutable-referrer-conflict";
+    const tag = "v1.2.3";
+
+    try {
+      const subjectManifest = getImageManifestV2(await generateManifest(name));
+      const { sha256: subjectDigest } = await createManifest(name, subjectManifest, "latest");
+      const subject = {
+        mediaType: subjectManifest.mediaType,
+        digest: subjectDigest,
+        size: manifestSize(subjectManifest),
+      };
+      const acceptedArtifact = {
+        ...getImageManifestV2(await generateManifest(name)),
+        subject,
+        annotations: { "org.opencontainers.image.title": "accepted" },
+      } satisfies ManifestSchema;
+      const rejectedArtifact = {
+        ...getImageManifestV2(await generateManifest(name)),
+        subject,
+        annotations: { "org.opencontainers.image.title": "rejected" },
+      } satisfies ManifestSchema;
+      const { sha256: acceptedDigest } = await createManifest(name, acceptedArtifact, tag);
+      const rejectedData = JSON.stringify(rejectedArtifact);
+      const rejectedDigest = await getSHA256(rejectedData);
+
+      const response = await fetch(
+        createRequest("PUT", `/v2/${name}/manifests/${tag}`, new Blob([rejectedData]).stream(), {
+          "Content-Type": "application/gzip",
+        }),
+      );
+
+      expect(response.status).toBe(409);
+      const referrers = await getReferrersIndex(name, subjectDigest);
+      expect(referrers.body.manifests.map((descriptor) => descriptor.digest)).toEqual([acceptedDigest]);
+      expect(await bindings.REGISTRY.head(`${name}/_referrers/${subjectDigest}/${rejectedDigest}`)).toBeNull();
+    } finally {
+      bindings.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
   test("PUT with subject indexes referrers and paginates results", async () => {
     const name = "referrers-index";
     const bindings = env as Env;
@@ -1097,7 +1442,7 @@ describe("v2 referrers", () => {
     expect(response.status).toEqual(400);
   });
 
-  test("PUT /v2/:name/manifests/:reference rejects missing local subjects", async () => {
+  test("PUT /v2/:name/manifests/:reference accepts and indexes a missing local subject", async () => {
     const name = "referrers-missing-subject";
     const bindings = env as Env;
     const missingSubjectDigest = numberedDigest(4500);
@@ -1118,13 +1463,38 @@ describe("v2 referrers", () => {
       }),
     );
 
-    expect(response.status).toEqual(400);
-    expect((await response.json()) as { errors: { code: string; message: string }[] }).toEqual({
-      errors: [expect.objectContaining({ code: "BLOB_UNKNOWN", message: `unknown subject ${missingSubjectDigest}` })],
-    });
-    expect(await bindings.REGISTRY.head(`${name}/manifests/artifact`)).toBeNull();
-    expect(await bindings.REGISTRY.head(`${name}/manifests/${artifactDigest}`)).toBeNull();
-    expect(await bindings.REGISTRY.head(`${name}/_referrers/${missingSubjectDigest}/${artifactDigest}`)).toBeNull();
+    expect(response.status).toEqual(201);
+    expect(response.headers.get("oci-subject")).toEqual(missingSubjectDigest);
+    expect(await bindings.REGISTRY.head(`${name}/manifests/artifact`)).not.toBeNull();
+    expect(await bindings.REGISTRY.head(`${name}/manifests/${artifactDigest}`)).not.toBeNull();
+    expect(await bindings.REGISTRY.head(`${name}/_referrers/${missingSubjectDigest}/${artifactDigest}`)).not.toBeNull();
+  });
+
+  test("a referrer pushed before its subject remains discoverable after the subject arrives", async () => {
+    const name = "referrers-before-subject";
+    const subjectManifest = getImageManifestV2(await generateManifest(name));
+    const subjectData = JSON.stringify(subjectManifest);
+    const subjectDigest = await getSHA256(subjectData);
+    const artifactManifest = {
+      ...getImageManifestV2(await generateManifest(name)),
+      artifactType: "application/vnd.cloudchamber.btrfs-chain.v1",
+      subject: {
+        mediaType: subjectManifest.mediaType,
+        digest: subjectDigest,
+        size: manifestSize(subjectManifest),
+      },
+    } satisfies ManifestSchema;
+    const { sha256: artifactDigest } = await createManifest(name, artifactManifest, "artifact");
+
+    const subjectResponse = await fetch(
+      createRequest("PUT", `/v2/${name}/manifests/${subjectDigest}`, new Blob([subjectData]).stream(), {
+        "Content-Type": subjectManifest.mediaType,
+      }),
+    );
+
+    expect(subjectResponse.status).toEqual(201);
+    const referrers = await getReferrersIndex(name, subjectDigest);
+    expect(referrers.body.manifests.map((descriptor) => descriptor.digest)).toContain(artifactDigest);
   });
 
   test("PUT /v2/:name/manifests/:reference rejects invalid subject-bearing OCI indexes", async () => {

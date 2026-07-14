@@ -10,6 +10,7 @@ import {
   resolveCleanupOptions,
   selectTagsToDelete,
 } from "../src/registry/cleanup";
+import { isImmutableTagReference, resolveImmutableTagPattern } from "../src/registry/tag-policy";
 
 describe("parseSemverTag", () => {
   test("accepts plain and v-prefixed semver", () => {
@@ -99,6 +100,15 @@ describe("selectTagsToDelete", () => {
     expect(sel.keepNonSemver).toEqual(["latest"]);
     expect(sel.deleteSemver.sort()).toEqual(["v1.0.0", "v2.0.0"]);
   });
+
+  test("retains protected releases while pruning unprotected prereleases normally", () => {
+    const pattern = resolveImmutableTagPattern(String.raw`v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)`);
+    const tags = ["v1.0.0", "v1.0.1", "v1.0.2-rc.1", "v1.0.3-rc.1"];
+    const sel = selectTagsToDelete(tags, 1, (tag) => isImmutableTagReference(tag, pattern));
+
+    expect(sel.keepSemver.sort()).toEqual(["v1.0.0", "v1.0.1", "v1.0.3-rc.1"]);
+    expect(sel.deleteSemver).toEqual(["v1.0.2-rc.1"]);
+  });
 });
 
 describe("resolveCleanupOptions", () => {
@@ -125,7 +135,12 @@ describe("resolveCleanupOptions", () => {
 const dockerContentType = "application/vnd.docker.distribution.manifest.v2+json";
 const credentials = `Basic ${btoa("hello:world")}`;
 
-function authedRequest(method: string, path: string, body: BodyInit | null = null, headers: Record<string, string> = {}) {
+function authedRequest(
+  method: string,
+  path: string,
+  body: BodyInit | null = null,
+  headers: Record<string, string> = {},
+) {
   return new Request(`https://registry.com${path}`, {
     method,
     body,
@@ -168,10 +183,14 @@ async function pushManifestWithTag(name: string, tag: string): Promise<void> {
     schemaVersion: 2,
     mediaType: dockerContentType,
     config: { mediaType: "application/vnd.docker.container.image.v1+json", size: config.size, digest: config.digest },
-    layers: [{ mediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip", size: layer.size, digest: layer.digest }],
+    layers: [
+      { mediaType: "application/vnd.docker.image.rootfs.diff.tar.gzip", size: layer.size, digest: layer.digest },
+    ],
   };
   const put = await callWorker(
-    authedRequest("PUT", `/v2/${name}/manifests/${tag}`, JSON.stringify(manifest), { "Content-Type": dockerContentType }),
+    authedRequest("PUT", `/v2/${name}/manifests/${tag}`, JSON.stringify(manifest), {
+      "Content-Type": dockerContentType,
+    }),
   );
   expect(put.ok).toBeTruthy();
 }
@@ -183,6 +202,27 @@ async function listTagPointers(name: string): Promise<string[]> {
 }
 
 describe("cleanupRepository (integration)", () => {
+  test("retention never deletes tags protected by the immutable pattern", async () => {
+    const e = env as Env;
+    const previousPattern = e.IMMUTABLE_TAG_PATTERN;
+    e.IMMUTABLE_TAG_PATTERN = String.raw`^v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)$`;
+    e.REGISTRY_CLIENT = new R2Registry(e);
+    const name = "cleanup-immutable-releases";
+
+    try {
+      for (const tag of ["v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3", "latest"]) {
+        await pushManifestWithTag(name, tag);
+      }
+
+      const result = await cleanupRepository(e, name, { retentionCount: 2, dryRun: false });
+      expect(result.tagsDeleted).toEqual([]);
+      expect(result.gcRan).toBe(false);
+      expect((await listTagPointers(name)).sort()).toEqual(["latest", "v1.0.0", "v1.0.1", "v1.0.2", "v1.0.3"]);
+    } finally {
+      e.IMMUTABLE_TAG_PATTERN = previousPattern;
+    }
+  });
+
   test("dry run reports the deletion plan without deleting anything", async () => {
     const e = env as Env;
     e.REGISTRY_CLIENT = new R2Registry(e);

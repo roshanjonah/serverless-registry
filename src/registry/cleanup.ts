@@ -1,16 +1,17 @@
 // Tag-retention + GC orchestration for the scheduled() handler.
 //
-// Policy: per repository, keep the N highest-precedence semver tags (default 3)
-// plus every non-semver tag (e.g. `latest`, branch names). Delete only the
-// surplus *tag pointers* — the digest manifest stays in place until untagged
-// GC reaps it, which keeps the operation crash-safe (a half-finished run can
-// be re-run with no data loss).
+// Policy: per repository, keep every protected tag, the N highest-precedence
+// unprotected semver tags (default 3), and every non-semver tag (e.g. `latest`,
+// branch names). Delete only surplus unprotected tag pointers — the digest
+// manifest stays in place until untagged GC reaps it, which keeps the operation
+// crash-safe (a half-finished run can be re-run with no data loss).
 //
 // After tag pruning, untagged-mode GC runs per repository to delete orphan
 // manifests, their referrer indexes, and any blobs that nothing pins.
 
 import { Env } from "../..";
 import { GarbageCollectionMode } from "./garbage-collector";
+import { isImmutableTagReference, resolveImmutableTagPattern } from "./tag-policy";
 
 export const DEFAULT_RETENTION_COUNT = 3;
 export const SEMVER_REGEX = /^v?(\d+)\.(\d+)\.(\d+)(?:-([0-9A-Za-z.-]+))?(?:\+([0-9A-Za-z.-]+))?$/;
@@ -100,20 +101,28 @@ export type TagSelection = {
   deleteSemver: string[];
 };
 
-export function selectTagsToDelete(tags: string[], retentionCount: number): TagSelection {
+export function selectTagsToDelete(
+  tags: string[],
+  retentionCount: number,
+  isProtected: (tag: string) => boolean = () => false,
+): TagSelection {
   const semver: SemverParsed[] = [];
+  const protectedSemver: SemverParsed[] = [];
   const nonSemver: string[] = [];
   for (const tag of tags) {
     const parsed = parseSemverTag(tag);
     if (parsed === null) {
       nonSemver.push(tag);
+    } else if (isProtected(tag)) {
+      protectedSemver.push(parsed);
     } else {
       semver.push(parsed);
     }
   }
   // Highest precedence first.
   semver.sort((a, b) => compareSemver(b, a));
-  const keepSemver = semver.slice(0, retentionCount).map((s) => s.tag);
+  protectedSemver.sort((a, b) => compareSemver(b, a));
+  const keepSemver = protectedSemver.concat(semver.slice(0, retentionCount)).map((s) => s.tag);
   const deleteSemver = semver.slice(retentionCount).map((s) => s.tag);
   return { keepSemver, keepNonSemver: nonSemver, deleteSemver };
 }
@@ -159,7 +168,10 @@ export async function cleanupRepository(
   options: CleanupOptions,
 ): Promise<RepositoryCleanupResult> {
   const tags = await listAllTags(env, repository);
-  const selection = selectTagsToDelete(tags, options.retentionCount);
+  const immutablePattern = resolveImmutableTagPattern(env.IMMUTABLE_TAG_PATTERN);
+  const selection = selectTagsToDelete(tags, options.retentionCount, (tag) =>
+    isImmutableTagReference(tag, immutablePattern),
+  );
 
   const result: RepositoryCleanupResult = {
     repository,
