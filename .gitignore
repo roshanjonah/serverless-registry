@@ -1,6 +1,5 @@
 .wrangler
-*.env
+.env*
 node_modules
-*.vars
-wrangler.toml
+.dev.vars*
 .claude/sessions/

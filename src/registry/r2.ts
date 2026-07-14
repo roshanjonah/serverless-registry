@@ -9,7 +9,7 @@ import {
   limit,
   split,
 } from "../chunk";
-import { InternalError, ManifestError, RangeError, ServerError } from "../errors";
+import { ImmutableTagError, InternalError, ManifestError, RangeError, ServerError } from "../errors";
 import { SHA256_PREFIX_LEN, getSHA256, hexToDigest, isValidDigest } from "../user";
 import { readableToBlob, readerToBlob, wrap } from "../utils";
 import { BlobUnknownError, ManifestUnknownError } from "../v2-errors";
@@ -31,6 +31,7 @@ import {
 } from "./registry";
 import { GarbageCollectionMode, GarbageCollector } from "./garbage-collector";
 import { ManifestSchema, manifestSchema } from "../manifest";
+import { isImmutableTagReference, resolveImmutableTagPattern } from "./tag-policy";
 
 export const ociImageIndexContentType = "application/vnd.oci.image.index.v1+json";
 
@@ -529,22 +530,21 @@ export class R2Registry implements Registry {
     }
 
     const manifest = manifestResult.data;
+    if (isValidDigest(reference) && reference !== digestStr) {
+      return {
+        response: new ManifestError(
+          "MANIFEST_INVALID",
+          `manifest digest ${digestStr} does not match reference ${reference}`,
+          { reference, digest: digestStr },
+        ),
+      };
+    }
+
     const subjectDigest = manifest.schemaVersion === 2 ? manifest.subject?.digest : undefined;
     if (subjectDigest !== undefined && !isValidDigest(subjectDigest)) {
       return {
         response: new ManifestError("MANIFEST_INVALID", `invalid subject digest ${subjectDigest}`),
       };
-    }
-    if (subjectDigest !== undefined) {
-      const [subjectManifest, subjectManifestErr] = await wrap(env.REGISTRY.head(`${name}/manifests/${subjectDigest}`));
-      if (subjectManifestErr) {
-        return wrapError("putManifestInner", subjectManifestErr);
-      }
-      if (subjectManifest === null) {
-        return {
-          response: new ManifestError("BLOB_UNKNOWN", `unknown subject ${subjectDigest}`),
-        };
-      }
     }
 
     const referrerDescriptor = descriptorFromManifest(manifest, digestStr, blob.size);
@@ -562,42 +562,61 @@ export class R2Registry implements Registry {
       hasSubject: subjectDigest !== undefined ? "true" : "false",
       ...(subjectDigest !== undefined ? { subjectDigest } : {}),
     };
+    const immutablePattern = resolveImmutableTagPattern(env.IMMUTABLE_TAG_PATTERN);
 
-    const putReference = async () => {
-      // if the reference is the same as a digest, it's not necessary to insert
-      if (reference === digestStr) return;
-      return await env.REGISTRY.put(`${name}/manifests/${reference}`, text, {
-        sha256: digest,
-        httpMetadata: {
-          contentType,
-        },
-        customMetadata,
-      });
+    const putOptions = {
+      sha256: digest,
+      httpMetadata: {
+        contentType,
+      },
+      customMetadata,
     };
 
-    const putTasks: Promise<unknown>[] = [
-      putReference(),
-      // this is the "main" manifest
-      env.REGISTRY.put(`${name}/manifests/${digestStr}`, text, {
-        sha256: digest,
+    const putReferrer = () => {
+      if (referrerDescriptor === null || subjectDigest === undefined) {
+        return null;
+      }
+      return env.REGISTRY.put(referrersPath(name, subjectDigest, digestStr), JSON.stringify(referrerDescriptor), {
         httpMetadata: {
-          contentType,
+          contentType: "application/json",
         },
-        customMetadata,
-      }),
-    ];
+      });
+    };
+    const digestPut = () => env.REGISTRY.put(`${name}/manifests/${digestStr}`, text, putOptions);
+    const immutableReference = reference !== digestStr && isImmutableTagReference(reference, immutablePattern);
 
-    if (referrerDescriptor !== null && subjectDigest !== undefined) {
-      putTasks.push(
-        env.REGISTRY.put(referrersPath(name, subjectDigest, digestStr), JSON.stringify(referrerDescriptor), {
-          httpMetadata: {
-            contentType: "application/json",
-          },
-        }),
-      );
+    if (immutableReference) {
+      // The digest must be durable before the protected tag becomes visible,
+      // and only an accepted tag may publish derived referrer state.
+      await digestPut();
+      const referenceKey = `${name}/manifests/${reference}`;
+      const created = await env.REGISTRY.put(referenceKey, text, {
+        ...putOptions,
+        onlyIf: { etagDoesNotMatch: "*" },
+      });
+      if (created === null) {
+        const existing = await env.REGISTRY.head(referenceKey);
+        const existingDigest = existing?.checksums.sha256 ? hexToDigest(existing.checksums.sha256) : undefined;
+        if (existingDigest !== digestStr) {
+          return { response: new ImmutableTagError(reference) };
+        }
+      }
+
+      const referrerPut = putReferrer();
+      if (referrerPut !== null) {
+        await referrerPut;
+      }
+    } else {
+      const putTasks: Promise<unknown>[] = [digestPut()];
+      if (reference !== digestStr) {
+        putTasks.push(env.REGISTRY.put(`${name}/manifests/${reference}`, text, putOptions));
+      }
+      const referrerPut = putReferrer();
+      if (referrerPut !== null) {
+        putTasks.push(referrerPut);
+      }
+      await Promise.all(putTasks);
     }
-
-    await Promise.all(putTasks);
     return {
       digest: hexToDigest(digest),
       location: `/v2/${name}/manifests/${reference}`,
@@ -928,7 +947,9 @@ export class R2Registry implements Registry {
     };
 
     if (length === undefined) {
-      console.error("Length needs to be defined for streaming upload to R2. Ensure Content-Length or Content-Range is provided.");
+      console.error(
+        "Length needs to be defined for streaming upload to R2. Ensure Content-Length or Content-Range is provided.",
+      );
       return {
         response: new InternalError(),
       };

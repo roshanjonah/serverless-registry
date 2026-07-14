@@ -47,6 +47,9 @@ Your registry should be up and running. It will refuse any requests if you don't
 
 Set the USERNAME and PASSWORD as secrets with `npx wrangler secret put USERNAME --env production` and `npx wrangler secret put PASSWORD --env production`.
 
+For local development, put the same names in an untracked `.dev.vars` file. Do not add passwords to `wrangler.toml`;
+Wrangler treats values under `vars` as plaintext configuration.
+
 ### Adding JWT authentication with public key
 
 You can add a base64 encoded JWT public key to verify passwords (or token) that are signed by the private key.
@@ -71,6 +74,26 @@ docker push $REGISTRY_URL/ubuntu:latest
 docker rmi ubuntu:latest $REGISTRY_URL/ubuntu:latest
 docker pull $REGISTRY_URL/ubuntu:latest
 ```
+
+### Protecting immutable release tags
+
+Set `IMMUTABLE_TAG_PATTERN` under `[env.production.vars]` to a JavaScript regular expression that must match the
+entire protected tag. For example, this protects strict `vX.Y.Z` releases while leaving `latest` mutable:
+
+```toml
+IMMUTABLE_TAG_PATTERN = 'v(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)'
+```
+
+Protected tags are created with an atomic conditional R2 write. Retrying the same manifest digest is idempotent;
+attempting to assign a different digest returns `409` with the OCI `DENIED` error code. Protected tags cannot be
+deleted directly, and retention cleanup never prunes them. While the policy is enabled, the API rejects every
+delete-by-digest request because alias discovery and digest deletion cannot be made atomic across R2 keys. Delete an
+unprotected tag by name and let untagged garbage collection remove its content. Direct blob deletion is also disabled
+because deleting a referenced layer or config would make a protected release unpullable. An invalid expression fails
+manifest writes before any manifest object is stored.
+
+The policy is enforced at the Worker API boundary. To preserve the invariant, restrict direct R2 write access and
+route registry writes through this Worker.
 
 ### Configuring Pull fallback
 
@@ -111,12 +134,12 @@ the target registry and setup the credentials.
 **Never put a registry password/token inside the wrangler.toml, please always use `wrangler secrets put`**
 
 You can also use docker.io with anonymous authentication:
+
 ```
 REGISTRIES_JSON = "[{ \"registry\": \"https://index.docker.io/\" }]"
 ```
 
 You can also set your `docker.io` credentials in the configuration to not have any rate-limiting.
-
 
 ### Known limitations
 

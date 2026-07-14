@@ -1,6 +1,6 @@
 import { Router } from "itty-router";
 import { BlobUnknownError, ManifestUnknownError } from "./v2-errors";
-import { InternalError, ServerError } from "./errors";
+import { ImmutableBlobError, ImmutableTagError, InternalError, ServerError } from "./errors";
 import { errorString, getStreamSize, jsonHeaders, wrap } from "./utils";
 import { hexToDigest, isValidDigest } from "./user";
 import {
@@ -26,6 +26,7 @@ import {
 } from "./registry/registry";
 import { RegistryHTTPClient } from "./registry/http";
 import { ociImageIndexContentType } from "./registry/r2";
+import { isImmutableTagReference, resolveImmutableTagPattern } from "./registry/tag-policy";
 
 const maxReferrersListLimit = 1000;
 const isOpaqueReferrersCursor = (cursor: string) => cursor.startsWith("/v2/");
@@ -79,7 +80,9 @@ v2Router.post("/_cleanup", async (req, env: Env) => {
         : base.retentionCount,
   };
 
-  console.log(`manual cleanup invoked retention=${options.retentionCount} dryRun=${options.dryRun} repo=${repo ?? "<all>"}`);
+  console.log(
+    `manual cleanup invoked retention=${options.retentionCount} dryRun=${options.dryRun} repo=${repo ?? "<all>"}`,
+  );
 
   if (repo !== undefined) {
     const result = await cleanupRepository(env, repo.toString(), options);
@@ -108,6 +111,13 @@ v2Router.delete("/:name+/manifests/:reference", async (req, env: Env) => {
 
   const { last, limit } = req.query;
   const { name, reference } = req.params;
+  const immutablePattern = resolveImmutableTagPattern(env.IMMUTABLE_TAG_PATTERN);
+  if (immutablePattern !== null && isValidDigest(reference)) {
+    return new ImmutableTagError(reference, "deleted while immutable tag policy is enabled");
+  }
+  if (isImmutableTagReference(reference, immutablePattern)) {
+    return new ImmutableTagError(reference, "deleted");
+  }
   const manifest = await env.REGISTRY.head(`${name}/manifests/${reference}`);
   if (manifest === null) {
     return new Response(JSON.stringify(ManifestUnknownError(reference)), { status: 404, headers: jsonHeaders() });
@@ -134,14 +144,22 @@ v2Router.delete("/:name+/manifests/:reference", async (req, env: Env) => {
     limit: limitInt,
     cursor: last?.toString(),
   });
+  const aliasesToDelete: string[] = [];
   for (const tag of tags.objects) {
     if (!tag.checksums.sha256) {
       continue;
     }
 
     if (hexToDigest(tag.checksums.sha256) === reference && tag.key !== `${name}/manifests/${reference}`) {
-      await env.REGISTRY.delete(tag.key);
+      const tagReference = tag.key.slice(`${name}/manifests/`.length);
+      if (isImmutableTagReference(tagReference, immutablePattern)) {
+        return new ImmutableTagError(tagReference, "deleted through its manifest digest");
+      }
+      aliasesToDelete.push(tag.key);
     }
+  }
+  if (aliasesToDelete.length > 0) {
+    await env.REGISTRY.delete(aliasesToDelete);
   }
 
   const url = new URL(req.url);
@@ -431,7 +449,7 @@ v2Router.get("/:name+/blobs/:digest", async (req, env: Env, context: ExecutionCo
           if (uploadResult === false) {
             console.error("Layer might be too big for the registry client", layerSize);
           }
-        })
+        }),
       );
 
       return new Response(s1, {
@@ -747,6 +765,9 @@ v2Router.get("/:name+/tags/list", async (req, env: Env) => {
 
 v2Router.delete("/:name+/blobs/:digest", async (req, env: Env) => {
   const { name, digest } = req.params;
+  if (resolveImmutableTagPattern(env.IMMUTABLE_TAG_PATTERN) !== null) {
+    return new ImmutableBlobError(digest);
+  }
 
   const res = await env.REGISTRY.head(`${name}/blobs/${digest}`);
 
