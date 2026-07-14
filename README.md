@@ -15,11 +15,12 @@ $ pnpm install
 
 After installation, there is a few steps to actually deploy the registry into production:
 
-1. Have your own `wrangler` file.
+1. Review the deployment configuration.
 
-```bash
-$ cp wrangler.toml.example wrangler.toml
-```
+The tracked `wrangler.toml` is the deployment source of truth. For a fresh deployment, review and update `name`,
+`routes`/`workers_dev`, and `env.production.r2_buckets[].bucket_name` before deploying. Also review the environment,
+retention, and observability settings for your deployment. `wrangler.toml.example` is reference material; do not copy it
+over the tracked file.
 
 2. Setup the R2 Bucket for this registry
 
@@ -27,11 +28,13 @@ $ cp wrangler.toml.example wrangler.toml
 $ npx wrangler --env production r2 bucket create r2-registry
 ```
 
-Add this to your `wrangler.toml`
+The tracked production configuration already contains this binding. If you use a different bucket name, update both the
+create command and the binding:
 
-```
+```toml
+[env.production]
 r2_buckets = [
-    { binding = "REGISTRY", bucket_name = "r2-registry"}
+  { binding = "REGISTRY", bucket_name = "r2-registry" }
 ]
 ```
 
