@@ -29,4 +29,9 @@ jobs:
 
       - run: pnpm install --frozen-lockfile --child-concurrency=10
       - run: pnpm run typecheck
+      - uses: oven-sh/setup-bun@v2
+        with:
+          bun-version: 1.4.2
+      - run: bun install --frozen-lockfile
+        working-directory: push
       - run: pnpm test
