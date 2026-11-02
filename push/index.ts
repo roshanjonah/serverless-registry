@@ -189,7 +189,7 @@ await withPushWorkspace(imageID.trim(), async ({ tarFile, imagePath, cacheFolder
   }
 
   const configManifest = path.join(imagePath, manifest.Config);
-  const config = await file(configManifest).text();
+  const config = new Uint8Array(await file(configManifest).arrayBuffer());
   const configDigest = new CryptoHasher("sha256").update(config).digest("hex");
 
   const compressedDigests = await Promise.all(tasks);

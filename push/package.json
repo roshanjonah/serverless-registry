@@ -3,7 +3,7 @@
   "module": "index.ts",
   "type": "module",
   "scripts": {
-    "test": "node --test workspace.node-test.mjs"
+    "test": "node --test *.node-test.mjs"
   },
   "devDependencies": {
     "@types/tar-fs": "^2.0.4",
